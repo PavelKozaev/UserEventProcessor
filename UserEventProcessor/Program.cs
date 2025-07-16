@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using System.Reactive.Linq;
 using UserEventProcessor.Data;
@@ -18,6 +19,9 @@ var host = Host.CreateDefaultBuilder(args)
         }
         services.AddNpgsqlDataSource(connectionString);
 
+        services.AddDbContext<ApplicationDbContext>(options =>
+            options.UseNpgsql(connectionString));
+
         services.AddScoped<IDataStorage, PostgresDataStorage>();
         services.AddScoped<StatisticsAggregator>();
         services.AddHostedService<KafkaConsumerService>();
@@ -25,6 +29,22 @@ var host = Host.CreateDefaultBuilder(args)
     .Build();
 
 var logger = host.Services.GetRequiredService<ILogger<Program>>();
+
+logger.LogInformation("Проверка и применение миграций базы данных...");
+try
+{
+    using var scope = host.Services.CreateScope();
+    var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+    await dbContext.Database.MigrateAsync();
+
+    logger.LogInformation("Миграции успешно применены.");
+}
+catch (Exception ex)
+{
+    logger.LogCritical(ex, "Произошла ошибка во время применения миграций БД.");
+    return;
+}
 
 logger.LogInformation("Настройка конвейера обработки событий...");
 
