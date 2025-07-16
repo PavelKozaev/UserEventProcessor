@@ -6,21 +6,23 @@ namespace UserEventProcessor.Services
 {
     public class KafkaConsumerService : BackgroundService
     {
+        private readonly ILogger<KafkaConsumerService> _logger;
         private readonly EventObservable _eventObservable;
         private readonly IConsumer<Ignore, string> _consumer;
         private readonly string _topic;
 
-        public KafkaConsumerService(EventObservable eventObservable)
+        public KafkaConsumerService(ILogger<KafkaConsumerService> logger, EventObservable eventObservable, IConfiguration configuration)
         {
+            _logger = logger;
             _eventObservable = eventObservable;
 
-            var bootstrapServers = Environment.GetEnvironmentVariable("KAFKA_BOOTSTRAP_SERVERS");
-            _topic = Environment.GetEnvironmentVariable("KAFKA_TOPIC");
-            var groupId = Environment.GetEnvironmentVariable("KAFKA_GROUP_ID");
+            var bootstrapServers = configuration["Kafka:BootstrapServers"];
+            _topic = configuration["Kafka:Topic"];
+            var groupId = configuration["Kafka:GroupId"];
 
             if (string.IsNullOrEmpty(bootstrapServers) || string.IsNullOrEmpty(_topic) || string.IsNullOrEmpty(groupId))
             {
-                throw new InvalidOperationException("Kafka environment variables (KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID) must be set.");
+                throw new InvalidOperationException("Настройки Kafka (Kafka:BootstrapServers, Kafka:Topic, Kafka:GroupId) должны быть установлены.");
             }
 
             var config = new ConsumerConfig
@@ -28,7 +30,7 @@ namespace UserEventProcessor.Services
                 BootstrapServers = bootstrapServers,
                 GroupId = groupId,
                 AutoOffsetReset = AutoOffsetReset.Earliest,
-                EnableAutoCommit = false
+                EnableAutoCommit = false 
             };
 
             _consumer = new ConsumerBuilder<Ignore, string>(config).Build();
@@ -36,44 +38,43 @@ namespace UserEventProcessor.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            Console.WriteLine("[KafkaConsumer] Сервис запущен. Подписка на топик...");
+            _logger.LogInformation("Сервис Kafka запущен. Подписка на топик '{Topic}'...", _topic);
             _consumer.Subscribe(_topic);
 
             try
             {
                 while (!stoppingToken.IsCancellationRequested)
                 {
+                    await Task.Yield(); 
+
                     try
                     {
                         var consumeResult = _consumer.Consume(stoppingToken);
+                        if (consumeResult is null) continue;
 
-                        Console.WriteLine($"[KafkaConsumer] Получено сообщение из топика '{consumeResult.TopicPartitionOffset}': {consumeResult.Message.Value}");
+                        _logger.LogInformation("Получено сообщение из Kafka: Partition={Partition}, Offset={Offset}.",
+                            consumeResult.TopicPartitionOffset.Partition, consumeResult.TopicPartitionOffset.Offset);
 
                         var userEvent = JsonSerializer.Deserialize<UserEvent>(consumeResult.Message.Value);
                         if (userEvent != null)
                         {
                             _eventObservable.Publish(userEvent);
-
                             _consumer.Commit(consumeResult);
                         }
                     }
                     catch (ConsumeException e)
                     {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[KafkaConsumer] Ошибка при чтении из Kafka: {e.Error.Reason}");
-                        Console.ResetColor();
+                        _logger.LogError(e, "Ошибка при чтении из Kafka: {Reason}", e.Error.Reason);
                     }
                     catch (JsonException e)
                     {
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine($"[KafkaConsumer] Ошибка десериализации JSON: {e.Message}. Сообщение будет пропущено.");
-                        Console.ResetColor();
+                        _logger.LogWarning(e, "Ошибка десериализации JSON. Сообщение будет пропущено.");
                     }
                 }
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("[KafkaConsumer] Операция отменена. Завершение работы...");
+                _logger.LogInformation("Операция отменена. Завершение работы Kafka consumer...");
             }
             finally
             {
@@ -83,11 +84,10 @@ namespace UserEventProcessor.Services
 
         public override void Dispose()
         {
+            _eventObservable.Complete();
             _consumer.Dispose();
             base.Dispose();
-
-            _eventObservable.Complete();
-            Console.WriteLine("[KafkaConsumer] Ресурсы потребителя Kafka освобождены.");
+            _logger.LogInformation("Ресурсы потребителя Kafka освобождены.");
         }
     }
 }
